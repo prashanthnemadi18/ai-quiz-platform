@@ -436,13 +436,13 @@ export default function TakeQuizPage() {
                   <input
                     type="number"
                     min="1"
-                    max="50"
+                    max="100"
                     value={quizConfig.questionCount}
-                    onChange={(e) => setQuizConfig({...quizConfig, questionCount: Math.max(1, Math.min(50, Number(e.target.value)))})}
+                    onChange={(e) => setQuizConfig({...quizConfig, questionCount: Math.max(1, Math.min(100, Number(e.target.value)))})}
                     className="w-full p-3 border-2 border-gray-200 rounded-xl focus:border-violet-500 focus:ring-2 focus:ring-violet-200 outline-none"
                     placeholder="e.g., 10"
                   />
-                  <p className="text-xs text-gray-500">Choose 1-50 questions</p>
+                  <p className="text-xs text-gray-500">Choose 1-100 questions</p>
                 </div>
 
                 <div className="space-y-2">
