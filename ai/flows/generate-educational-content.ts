@@ -52,42 +52,57 @@ export async function generateEducationalContent(
   const difficulty = input.difficulty || 'medium';
 
   // Build the AI prompt
+  let typeInstructions = '';
+  if (types.length === 1) {
+    // Only one type selected - be very explicit
+    const typeMap = {
+      'mcq': 'multiple choice questions with 4 options each',
+      'tf': 'true/false questions',
+      'short': 'short answer questions'
+    };
+    typeInstructions = `Generate ONLY ${typeMap[types[0]]}. ALL ${count} questions MUST be ${types[0]} type.`;
+  } else {
+    // Multiple types - distribute evenly
+    typeInstructions = `Distribute questions evenly across these types: ${types.join(', ')}`;
+  }
+
   const prompt = `You are an expert educational content creator. Generate ${count} high-quality educational questions about "${topic}".
 
 Requirements:
 - Difficulty level: ${difficulty}
-- Question types to include: ${types.join(', ')}
-- Distribute questions evenly across the specified types
-- For MCQ (multiple choice): provide 4 options with one correct answer
-- For TF (true/false): provide a statement and the correct answer
+- ${typeInstructions}
+- For MCQ (multiple choice): provide exactly 4 options with one correct answer
+- For TF (true/false): provide a statement and the correct answer (True or False)
 - For Short Answer: provide an open-ended question
+
+IMPORTANT: ${types.length === 1 ? `ALL ${count} questions MUST be type "${types[0]}"` : 'Distribute questions evenly across the specified types'}
 
 Return ONLY a valid JSON object in this exact format (no markdown, no code blocks):
 {
   "questions": [
-    {
+    ${types.includes('mcq') ? `{
       "type": "mcq",
       "question": "Question text here?",
       "choices": ["Option A", "Option B", "Option C", "Option D"],
       "answer": "Option A",
       "explanation": "Brief explanation of why this is correct"
-    },
-    {
+    }` : ''}${types.includes('tf') && types.includes('mcq') ? ',' : ''}
+    ${types.includes('tf') ? `{
       "type": "tf",
       "question": "Statement to evaluate",
       "choices": ["True", "False"],
       "answer": "True",
       "explanation": "Brief explanation"
-    },
-    {
+    }` : ''}${types.includes('short') && (types.includes('mcq') || types.includes('tf')) ? ',' : ''}
+    ${types.includes('short') ? `{
       "type": "short",
       "question": "Open-ended question?",
       "explanation": "Sample answer or key points to include"
-    }
+    }` : ''}
   ]
 }
 
-Generate exactly ${count} questions now:`;
+Generate exactly ${count} questions of type ${types.length === 1 ? types[0] : types.join(', ')} now:`;
 
   try {
     // Generate content using AI
@@ -106,8 +121,31 @@ Generate exactly ${count} questions now:`;
       throw new Error('Invalid response structure from AI');
     }
 
-    // Ensure we have the right number of questions
-    const questions = parsed.questions.slice(0, count);
+    // Filter questions to match requested types and ensure correct count
+    let questions = parsed.questions.filter((q: any) => types.includes(q.type));
+    
+    // If we don't have enough questions of the right type, regenerate
+    if (questions.length < count) {
+      console.warn(`AI generated ${questions.length} questions of requested types, expected ${count}. Using fallback.`);
+      return generateFallbackQuestions(topic, count, types);
+    }
+
+    // Ensure we have exactly the right number of questions
+    questions = questions.slice(0, count);
+
+    // Validate each question has required fields
+    questions = questions.map((q: any) => {
+      if (q.type === 'mcq' && (!q.choices || q.choices.length < 2)) {
+        q.choices = ['Option A', 'Option B', 'Option C', 'Option D'];
+      }
+      if (q.type === 'tf' && (!q.choices || q.choices.length !== 2)) {
+        q.choices = ['True', 'False'];
+      }
+      if (!q.answer && q.choices && q.choices.length > 0) {
+        q.answer = q.choices[0];
+      }
+      return q;
+    });
 
     return { questions };
   } catch (error) {
