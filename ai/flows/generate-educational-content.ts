@@ -47,62 +47,143 @@ export async function generateEducationalContent(
   input: GenerateEducationalContentInput
 ): Promise<GenerateEducationalContentOutput> {
   const topic = input.topic.trim();
-  const count = Math.max(1, input.questionCount || 5);
+  const count = Math.max(1, Math.min(100, input.questionCount || 5)); // Cap at 100
   const types: Array<'mcq' | 'tf' | 'short'> = input.types && input.types.length > 0 ? input.types : ['mcq', 'tf', 'short'];
   const difficulty = input.difficulty || 'medium';
 
-  // Build the AI prompt
-  let typeInstructions = '';
-  if (types.length === 1) {
-    // Only one type selected - be very explicit
-    const typeMap = {
-      'mcq': 'multiple choice questions with 4 options each',
-      'tf': 'true/false questions',
-      'short': 'short answer questions'
-    };
-    typeInstructions = `Generate ONLY ${typeMap[types[0]]}. ALL ${count} questions MUST be ${types[0]} type.`;
-  } else {
-    // Multiple types - distribute evenly
-    typeInstructions = `Distribute questions evenly across these types: ${types.join(', ')}`;
+  // For large question counts, generate in batches
+  if (count > 20) {
+    return generateInBatches(topic, count, types, difficulty);
   }
 
-  const prompt = `You are an expert educational content creator. Generate ${count} high-quality educational questions about "${topic}".
+  return generateBatch(topic, count, types, difficulty);
+}
 
-Requirements:
-- Difficulty level: ${difficulty}
-- ${typeInstructions}
-- For MCQ (multiple choice): provide exactly 4 options with one correct answer
-- For TF (true/false): provide a statement and the correct answer (True or False)
-- For Short Answer: provide an open-ended question
+// Generate questions in batches for large counts
+async function generateInBatches(
+  topic: string,
+  totalCount: number,
+  types: Array<'mcq' | 'tf' | 'short'>,
+  difficulty: string
+): Promise<GenerateEducationalContentOutput> {
+  const batchSize = 20;
+  const batches = Math.ceil(totalCount / batchSize);
+  const allQuestions: any[] = [];
+  const seenQuestions = new Set<string>(); // Track unique questions
 
-IMPORTANT: ${types.length === 1 ? `ALL ${count} questions MUST be type "${types[0]}"` : 'Distribute questions evenly across the specified types'}
+  for (let i = 0; i < batches; i++) {
+    const questionsNeeded = Math.min(batchSize, totalCount - allQuestions.length);
+    
+    try {
+      const batch = await generateBatch(topic, questionsNeeded, types, difficulty);
+      
+      // Deduplicate questions
+      for (const question of batch.questions) {
+        const questionKey = question.question.toLowerCase().trim();
+        if (!seenQuestions.has(questionKey)) {
+          seenQuestions.add(questionKey);
+          allQuestions.push(question);
+        }
+      }
+      
+      // If we have enough unique questions, stop
+      if (allQuestions.length >= totalCount) {
+        break;
+      }
+    } catch (error) {
+      console.error(`Error generating batch ${i + 1}:`, error);
+    }
+  }
 
-Return ONLY a valid JSON object in this exact format (no markdown, no code blocks):
-{
-  "questions": [
-    ${types.includes('mcq') ? `{
+  // If we still don't have enough, use fallback
+  if (allQuestions.length < totalCount) {
+    const remaining = totalCount - allQuestions.length;
+    const fallback = generateFallbackQuestions(topic, remaining, types);
+    allQuestions.push(...fallback.questions);
+  }
+
+  return { questions: allQuestions.slice(0, totalCount) };
+}
+
+// Generate a single batch of questions
+async function generateBatch(
+  topic: string,
+  count: number,
+  types: Array<'mcq' | 'tf' | 'short'>,
+  difficulty: string
+): Promise<GenerateEducationalContentOutput> {
+  // Build the AI prompt with strict type enforcement
+  let typeInstructions = '';
+  let exampleFormat = '';
+  
+  if (types.length === 1) {
+    // Only one type selected - be VERY explicit
+    const type = types[0];
+    if (type === 'mcq') {
+      typeInstructions = `Generate ONLY multiple choice questions. EVERY SINGLE question must have:
+- type: "mcq"
+- 4 different options
+- One correct answer
+NO true/false questions. NO short answer questions. ONLY multiple choice.`;
+      exampleFormat = `{
       "type": "mcq",
-      "question": "Question text here?",
+      "question": "What is...?",
       "choices": ["Option A", "Option B", "Option C", "Option D"],
       "answer": "Option A",
-      "explanation": "Brief explanation of why this is correct"
-    }` : ''}${types.includes('tf') && types.includes('mcq') ? ',' : ''}
-    ${types.includes('tf') ? `{
+      "explanation": "Explanation here"
+    }`;
+    } else if (type === 'tf') {
+      typeInstructions = `Generate ONLY true/false questions. EVERY SINGLE question must have:
+- type: "tf"
+- 2 options: True and False
+- Correct answer (True or False)
+NO multiple choice questions. NO short answer questions. ONLY true/false.`;
+      exampleFormat = `{
       "type": "tf",
       "question": "Statement to evaluate",
       "choices": ["True", "False"],
       "answer": "True",
-      "explanation": "Brief explanation"
-    }` : ''}${types.includes('short') && (types.includes('mcq') || types.includes('tf')) ? ',' : ''}
-    ${types.includes('short') ? `{
+      "explanation": "Explanation here"
+    }`;
+    } else {
+      typeInstructions = `Generate ONLY short answer questions. EVERY SINGLE question must have:
+- type: "short"
+- Open-ended question
+- Sample answer in explanation
+NO multiple choice questions. NO true/false questions. ONLY short answer.`;
+      exampleFormat = `{
       "type": "short",
-      "question": "Open-ended question?",
-      "explanation": "Sample answer or key points to include"
-    }` : ''}
+      "question": "Explain...",
+      "explanation": "Sample answer here"
+    }`;
+    }
+  } else {
+    typeInstructions = `Distribute questions evenly across these types: ${types.join(', ')}`;
+    exampleFormat = `Mix of ${types.join(', ')} questions`;
+  }
+
+  const prompt = `You are an expert educational content creator. Generate ${count} UNIQUE, NON-REPETITIVE educational questions about "${topic}".
+
+CRITICAL REQUIREMENTS:
+1. Difficulty level: ${difficulty}
+2. ${typeInstructions}
+3. Each question MUST be UNIQUE - no repeated questions
+4. Each question MUST be DIFFERENT from others
+5. Cover DIFFERENT aspects of the topic
+
+${types.length === 1 ? `STRICT TYPE REQUIREMENT: ALL ${count} questions MUST have type="${types[0]}"` : ''}
+
+Question Format:
+${exampleFormat}
+
+Return ONLY a valid JSON object (no markdown, no code blocks, no extra text):
+{
+  "questions": [
+    // ${count} unique questions here
   ]
 }
 
-Generate exactly ${count} questions of type ${types.length === 1 ? types[0] : types.join(', ')} now:`;
+Generate exactly ${count} UNIQUE questions now:`;
 
   try {
     // Generate content using AI
@@ -121,29 +202,76 @@ Generate exactly ${count} questions of type ${types.length === 1 ? types[0] : ty
       throw new Error('Invalid response structure from AI');
     }
 
-    // Filter questions to match requested types and ensure correct count
-    let questions = parsed.questions.filter((q: any) => types.includes(q.type));
+    // STRICT type filtering - only keep questions of requested types
+    let questions = parsed.questions.filter((q: any) => {
+      // Must have the correct type
+      if (!types.includes(q.type)) {
+        console.warn(`Filtered out question with wrong type: ${q.type}, expected: ${types.join(', ')}`);
+        return false;
+      }
+      
+      // Additional validation based on type
+      if (q.type === 'mcq') {
+        // MCQ must have at least 2 choices
+        if (!q.choices || q.choices.length < 2) {
+          console.warn('Filtered out MCQ with insufficient choices');
+          return false;
+        }
+      } else if (q.type === 'tf') {
+        // TF must have exactly 2 choices
+        if (!q.choices || q.choices.length !== 2) {
+          console.warn('Filtered out TF with wrong number of choices');
+          return false;
+        }
+      }
+      
+      return true;
+    });
     
-    // If we don't have enough questions of the right type, regenerate
+    // If we don't have enough questions of the right type, use fallback
     if (questions.length < count) {
-      console.warn(`AI generated ${questions.length} questions of requested types, expected ${count}. Using fallback.`);
-      return generateFallbackQuestions(topic, count, types);
+      console.warn(`AI generated only ${questions.length} valid questions of requested types, expected ${count}. Using fallback for remaining.`);
+      const remaining = count - questions.length;
+      const fallback = generateFallbackQuestions(topic, remaining, types);
+      questions = [...questions, ...fallback.questions];
     }
 
     // Ensure we have exactly the right number of questions
     questions = questions.slice(0, count);
 
-    // Validate each question has required fields
-    questions = questions.map((q: any) => {
-      if (q.type === 'mcq' && (!q.choices || q.choices.length < 2)) {
-        q.choices = ['Option A', 'Option B', 'Option C', 'Option D'];
+    // Validate and fix each question
+    questions = questions.map((q: any, index: number) => {
+      // Ensure correct type
+      if (!types.includes(q.type)) {
+        q.type = types[0]; // Force to first requested type
       }
-      if (q.type === 'tf' && (!q.choices || q.choices.length !== 2)) {
+      
+      // Fix choices based on type
+      if (q.type === 'mcq') {
+        if (!q.choices || q.choices.length < 4) {
+          q.choices = [
+            q.choices?.[0] || 'Option A',
+            q.choices?.[1] || 'Option B', 
+            q.choices?.[2] || 'Option C',
+            q.choices?.[3] || 'Option D'
+          ];
+        }
+      } else if (q.type === 'tf') {
         q.choices = ['True', 'False'];
+      } else if (q.type === 'short') {
+        q.choices = undefined; // Short answer has no choices
       }
+      
+      // Ensure answer exists
       if (!q.answer && q.choices && q.choices.length > 0) {
         q.answer = q.choices[0];
       }
+      
+      // Ensure question text exists
+      if (!q.question || q.question.trim() === '') {
+        q.question = `Question ${index + 1} about ${topic}`;
+      }
+      
       return q;
     });
 
@@ -163,36 +291,61 @@ function generateFallbackQuestions(
   types: Array<'mcq' | 'tf' | 'short'>
 ): GenerateEducationalContentOutput {
   const questions: GenerateEducationalContentOutput['questions'] = [];
+  
+  // Generate unique questions by varying the content
+  const aspects = [
+    'fundamental concepts',
+    'practical applications',
+    'historical context',
+    'key principles',
+    'common misconceptions',
+    'advanced topics',
+    'real-world examples',
+    'theoretical foundations'
+  ];
 
   for (let i = 0; i < count; i++) {
     const type = types[i % types.length];
+    const aspect = aspects[i % aspects.length];
 
     if (type === 'mcq') {
       questions.push({
         type: 'mcq',
-        question: `Which of the following best describes ${topic}?`,
+        question: `Which of the following best describes the ${aspect} of ${topic}?`,
         choices: [
-          `A fundamental concept in ${topic}`,
+          `A key aspect of ${topic}`,
           `An unrelated concept`,
-          `A common misconception`,
-          `A historical reference`,
+          `A common misconception about ${topic}`,
+          `A historical reference only`,
         ],
-        answer: `A fundamental concept in ${topic}`,
-        explanation: `This is a basic question about ${topic}.`,
+        answer: `A key aspect of ${topic}`,
+        explanation: `This question tests understanding of ${aspect} in ${topic}.`,
       });
     } else if (type === 'tf') {
+      const statements = [
+        `${topic} is an important concept in its field.`,
+        `Understanding ${topic} requires knowledge of ${aspect}.`,
+        `${topic} has practical applications in real-world scenarios.`,
+        `The ${aspect} of ${topic} are well-established.`,
+      ];
       questions.push({
         type: 'tf',
-        question: `${topic} is an important concept in its field.`,
+        question: statements[i % statements.length],
         choices: ['True', 'False'],
         answer: 'True',
-        explanation: `${topic} is indeed significant in its domain.`,
+        explanation: `This statement about ${topic} is correct.`,
       });
     } else {
+      const prompts = [
+        `Explain the ${aspect} of ${topic}.`,
+        `Describe how ${topic} relates to ${aspect}.`,
+        `What are the key points about ${topic} regarding ${aspect}?`,
+        `Discuss the importance of ${aspect} in ${topic}.`,
+      ];
       questions.push({
         type: 'short',
-        question: `Explain ${topic} in your own words.`,
-        explanation: `Students should demonstrate understanding of ${topic}.`,
+        question: prompts[i % prompts.length],
+        explanation: `Students should demonstrate understanding of ${aspect} in ${topic}.`,
       });
     }
   }
